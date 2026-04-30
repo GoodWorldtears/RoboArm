@@ -1,0 +1,10 @@
+customtkinter
+CTkMessagebox
+pygame
+urx
+math3d
+opencv-python
+numpy
+scipy
+pyserial
+robodk

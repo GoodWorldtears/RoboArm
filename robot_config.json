@@ -1,0 +1,16 @@
+{
+  "diagnost_ip": "192.168.8.3",
+  "surgeon_ip": "192.168.8.4",
+  "diagnost_camera_url": "http://192.168.8.150:8081/",
+  "surgeon_camera_url": "http://192.168.8.149:8081/",
+  "laser_host": "192.168.8.149",
+  "laser_port": 9093,
+  "dashboard_port": 29999,
+  "joystick_master_id": 0,
+  "joystick_slave_id": 1,
+  "deadzone": 0.2,
+  "linear_velocity": 0.015,
+  "diagnost_linear_velocity": 0.01,
+  "rotational_velocity": 0.19,
+  "acceleration": 0.1
+}

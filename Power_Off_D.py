@@ -1,0 +1,16 @@
+# Dashboard examples
+# CB-series: https://www.universal-robots.com/how-tos-and-faqs/how-to/ur-how-tos/dashboard-server-port-29999-15690/
+# E-series:  https://www.universal-robots.com/how-tos-and-faqs/how-to/ur-how-tos/dashboard-server-e-series-port-29999-42728/
+import socket
+import time
+import multiprocessing as mp
+from config import load_config, dashboard_command
+
+def main(heartbeat, host=None):
+    cfg = load_config()
+    host = host or cfg.diagnost_ip
+    dashboard_command(host, "power off", cfg.dashboard_port)
+    heartbeat.put((mp.current_process().name, "FINISHED"))
+
+if __name__ == "__main__":
+    main()
