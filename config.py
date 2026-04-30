@@ -16,6 +16,7 @@ class AppConfig:
     laser_host: str = "192.168.8.149"
     laser_port: int = 9093
     dashboard_port: int = 29999
+    control_port: int = 30002
     joystick_master_id: int = 0
     joystick_slave_id: int = 1
     deadzone: float = 0.2

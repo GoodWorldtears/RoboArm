@@ -1,14 +1,12 @@
-import time
-import pygame
-import urx
-from urx_compat import patch_urx_math3d
-patch_urx_math3d()
-import multiprocessing as mp
-from copy import deepcopy
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
+import multiprocessing as mp
 import os
+import socket
+import time
+from datetime import datetime
+
+import pygame
 
 from config import load_config
 
@@ -20,254 +18,241 @@ def as_float(value, default=0.0):
         return default
 
 
-class Robot:
+class DirectURRobot:
+    def __init__(self, host, port, logger):
+        self.host = host
+        self.port = int(port)
+        self.logger = logger
+        self.sock = None
+        self.last_program = None
 
-    def __init__(self, IP, is_master, logger, auto, lock, shared_path, heartbeat, slave_IP=None):
+    def connect(self):
+        self.close()
+        self.logger.info(f"Подключение URScript {self.host}:{self.port}")
+        self.sock = socket.create_connection((self.host, self.port), timeout=3)
+        self.sock.settimeout(1)
+        self.logger.info(f"URScript подключён {self.host}:{self.port}")
+
+    def send(self, program):
+        if self.sock is None:
+            self.connect()
+        try:
+            self.sock.sendall(program.encode("utf-8"))
+        except OSError:
+            self.logger.warning(f"Переоткрытие URScript соединения {self.host}:{self.port}")
+            self.connect()
+            self.sock.sendall(program.encode("utf-8"))
+        self.last_program = program
+
+    def speedl(self, speeds, acceleration, duration):
+        values = ", ".join(f"{float(value):.6f}" for value in speeds)
+        self.send(f"speedl([{values}], {float(acceleration):.6f}, {float(duration):.6f})\n")
+
+    def stop(self):
+        try:
+            self.speedl([0.0] * 6, 0.2, 0.1)
+            self.send("stopl(0.200000)\n")
+        except Exception:
+            self.logger.exception(f"Не удалось остановить {self.host}")
+
+    def close(self):
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            self.sock = None
+
+
+class JoystickRobotController:
+    def __init__(self, host, is_master, logger, auto, lock, shared_path, heartbeat, slave_host=None):
         self.config = load_config()
-        self.IP = IP
+        self.host = host
         self.is_master = is_master
         self.logger = logger
         self.auto = auto
         self.lock = lock
         self.shared_path = shared_path
         self.heartbeat = heartbeat
-        self.slave_IP = slave_IP
-        self.path = []
+        self.slave_host = slave_host
+        self.control_port = int(getattr(self.config, "control_port", 30002))
+        self.deadzone = as_float(self.config.deadzone, 0.2)
+        self.linear_velocity = as_float(
+            self.config.linear_velocity if is_master else self.config.diagnost_linear_velocity,
+            0.015 if is_master else 0.01,
+        )
+        self.rotational_velocity = as_float(self.config.rotational_velocity, 0.19)
+        self.acceleration = as_float(self.config.acceleration, 0.1)
+        self.duration = 0.12
         self.last_heartbeat = time.time()
-        self.robot = None
-        self.slave = None
         self.joystick = None
-        self.deadzone = self.config.deadzone
-
-    @staticmethod
-    def pose_to_list(pose):
-        return [float(value) for value in pose]
-
-    def init_robot(self):
-        self.logger.debug(f"Подключение к роботу IP: {self.IP}...")
-        self.robot = urx.Robot(self.IP)
-        self.logger.info(f"Успешное подключение к роботу IP: {self.IP}")
-
-    def ensure_slave(self):
-        if not self.is_master:
-            return None
-        if self.slave:
-            return self.slave
-        if not self.slave_IP:
-            raise RuntimeError("Отсутствует slave IP")
-        self.logger.debug(f"Подключение к роботу slave IP: {self.slave_IP}...")
-        self.slave = urx.Robot(self.slave_IP)
-        self.logger.info(f"Успешное подключение к роботу slave IP: {self.slave_IP}")
-        return self.slave
+        self.robot = DirectURRobot(self.host, self.control_port, self.logger)
+        self.slave = None
+        self.was_moving = False
 
     def init_joystick(self):
         pygame.init()
         pygame.joystick.init()
-
-        if self.is_master:
-            joystick_id = self.config.joystick_master_id
-        else:
-            joystick_id = self.config.joystick_slave_id
-
-        joystick_count = pygame.joystick.get_count()
-        if joystick_count == 0:
+        joystick_id = self.config.joystick_master_id if self.is_master else self.config.joystick_slave_id
+        joystick_id = int(joystick_id)
+        count = pygame.joystick.get_count()
+        if count == 0:
             raise RuntimeError("Джойстик не найден")
-        if joystick_id >= joystick_count:
-            self.logger.warning(
-                f"Джойстик id={joystick_id} не найден, используется id=0 из {joystick_count} доступных"
-            )
+        if joystick_id >= count:
+            self.logger.warning(f"Джойстик id={joystick_id} не найден, используется id=0 из {count}")
             joystick_id = 0
-
         self.joystick = pygame.joystick.Joystick(joystick_id)
         self.joystick.init()
-        self.logger.info(f"Инициализирован джойстик id={joystick_id}, name: {self.joystick.get_name()}")
+        self.logger.info(
+            f"Инициализирован джойстик id={joystick_id}, name={self.joystick.get_name()}, "
+            f"axes={self.joystick.get_numaxes()}, buttons={self.joystick.get_numbuttons()}, hats={self.joystick.get_numhats()}"
+        )
 
-    def start_robot(self):
-        self.init_joystick()
-        self.init_robot()
-        self.set_robot_settings()
-        self.main_loop()
-
-    def set_robot_settings(self, linear_velocity=0.3, rotational_velocity=0.1, acceleration=0.1):
-        if self.is_master:
-            self.linear_velocity = as_float(self.config.linear_velocity, 0.015)
-        else:
-            self.linear_velocity = as_float(self.config.diagnost_linear_velocity, 0.01)
-        self.rotational_velocity = as_float(self.config.rotational_velocity, 0.19)
-        self.acceleration = as_float(self.config.acceleration, 0.1)
-
-    def get_speeds(self):
-        pygame.event.pump()
-        speeds = [0, 0, 0, 0, 0, 0]  # массив скоростей
-
-        hat = self.joystick.get_hat(0) if self.joystick.get_numhats() > 0 else (0, 0)
-        speeds[1] = as_float(hat[1]) * self.linear_velocity  # скорость по оси у
-        speeds[0] = as_float(hat[0]) * self.linear_velocity  # скорость по оси х
-        if self.button_pressed(2) and not self.button_pressed(3):  # движение по оси z
-            speeds[2] = 1 * -self.linear_velocity  # скорость по оси z
-        if self.button_pressed(3) and not self.button_pressed(2):  # движение против оси z
-            speeds[2] = 1 * self.linear_velocity  # скорость по оси z
-
-        axes_count = self.joystick.get_numaxes()
-        axis0 = self.joystick.get_axis(0) if axes_count > 0 else 0
-        axis1 = self.joystick.get_axis(1) if axes_count > 1 else 0
-        axis3 = self.joystick.get_axis(3) if axes_count > 3 else 0
-
-        speeds[3] = (axis1 if abs(axis1) > self.deadzone else 0.0) * self.rotational_velocity
-        speeds[4] = (axis0 if abs(axis0) > self.deadzone else 0.0) * self.rotational_velocity
-        speeds[5] = (axis3 if abs(axis3) > self.deadzone else 0.0) * self.rotational_velocity
-
-        return [float(speed) for speed in speeds]
+    def ensure_slave(self):
+        if not self.is_master or not self.slave_host:
+            return None
+        if self.slave is None:
+            self.slave = DirectURRobot(self.slave_host, self.control_port, self.logger)
+            self.slave.connect()
+        return self.slave
 
     def button_pressed(self, button_id):
-        return self.joystick.get_numbuttons() > button_id and self.joystick.get_button(button_id)
+        return self.joystick.get_numbuttons() > button_id and bool(self.joystick.get_button(button_id))
+
+    def axis(self, axis_id):
+        if self.joystick.get_numaxes() <= axis_id:
+            return 0.0
+        value = as_float(self.joystick.get_axis(axis_id), 0.0)
+        return value if abs(value) >= self.deadzone else 0.0
+
+    def hat(self):
+        if self.joystick.get_numhats() == 0:
+            return 0.0, 0.0
+        x, y = self.joystick.get_hat(0)
+        return as_float(x), as_float(y)
+
+    def read_speeds(self):
+        pygame.event.pump()
+        hat_x, hat_y = self.hat()
+        speeds = [0.0] * 6
+
+        speeds[0] = hat_x * self.linear_velocity
+        speeds[1] = hat_y * self.linear_velocity
+
+        if self.button_pressed(2) and not self.button_pressed(3):
+            speeds[2] = -self.linear_velocity
+        elif self.button_pressed(3) and not self.button_pressed(2):
+            speeds[2] = self.linear_velocity
+
+        speeds[3] = -self.axis(1) * self.rotational_velocity
+        speeds[4] = -self.axis(0) * self.rotational_velocity
+        speeds[5] = self.axis(3) * self.rotational_velocity
+
+        return [float(value) for value in speeds]
 
     @staticmethod
     def has_motion(speeds):
-        return any(abs(speed) > 1e-6 for speed in speeds)
+        return any(abs(value) > 1e-6 for value in speeds)
 
-    @staticmethod
-    def format_speedl(speeds, acceleration, duration):
-        speed_values = ", ".join(f"{float(speed):.6f}" for speed in speeds)
-        return f"speedl([{speed_values}], {float(acceleration):.6f}, {float(duration):.6f})"
+    def update_heartbeat(self, state="ALIVE"):
+        now = time.time()
+        if state == "READY" or now - self.last_heartbeat >= 2.0:
+            self.heartbeat.put((mp.current_process().name, state, time.time()))
+            self.last_heartbeat = now
 
-    def send_speedl(self, robot, speeds, duration=0.2):
-        robot.send_program(self.format_speedl(speeds, self.acceleration, duration))
+    def start(self):
+        self.init_joystick()
+        self.robot.connect()
+        self.update_heartbeat("READY")
+        self.logger.info(
+            f"Прямое управление запущено: host={self.host}, port={self.control_port}, "
+            f"linear={self.linear_velocity}, rotational={self.rotational_velocity}, acceleration={self.acceleration}"
+        )
+        self.loop()
 
-    def stop_motion(self):
-        try:
-            self.send_speedl(self.robot, [0.0] * 6, duration=0.1)
-            if self.slave:
-                self.send_speedl(self.slave, [0.0] * 6, duration=0.1)
-        except Exception:
-            self.logger.exception("Ошибка остановки движения")
-
-    def update_heartbeat(self):
-        current_time = time.time()
-        if current_time - self.last_heartbeat > 2.0:
-            self.heartbeat.put((mp.current_process().name, "ALIVE", time.time()))
-            self.last_heartbeat = current_time
-
-    def get_slave_speeds(self):
-        if not self.is_master:
-            return
-        T = self.robot.get_pose().array  # матрица перехода основание-конечное звено
-        # запись элементов матрицы в переменные
-        z1, z2 = -T[0][2], -T[1][2]
-        yx, yy = T[0][1], -T[1][1]
-        xx, xy = T[0][0], -T[1][0]
-
-        speeds = [self.speeds[2] * z1 + self.speeds[0] * xx + self.speeds[1] * yx,
-                  self.speeds[2] * z2 + self.speeds[0] * xy + self.speeds[1] * yy, 0, 0, 0, 0]
-        return speeds
-
-    def main_loop(self):
-        self.running = True
-        stop = False
-        pygame.event.pump()
-
-        while self.running:
-
+    def loop(self):
+        while True:
             self.update_heartbeat()
 
             if self.lock.value:
-                if not stop:
-                    self.stop_motion()
-                    stop = True
+                if self.was_moving:
+                    self.robot.stop()
+                    if self.slave:
+                        self.slave.stop()
+                    self.was_moving = False
+                time.sleep(0.05)
                 continue
+
+            speeds = self.read_speeds()
+
+            if self.has_motion(speeds):
+                self.robot.speedl(speeds, self.acceleration, self.duration)
+                if self.is_master and self.auto.value == 0 and self.button_pressed(0):
+                    slave = self.ensure_slave()
+                    if slave:
+                        slave.speedl(speeds, self.acceleration, self.duration)
+                self.was_moving = True
             else:
-                stop = False
+                if self.was_moving:
+                    self.robot.stop()
+                    if self.slave:
+                        self.slave.stop()
+                    self.was_moving = False
+                time.sleep(0.02)
 
-            self.speeds = self.get_speeds()
-
-            try:
-                if self.has_motion(self.speeds):
-                    self.send_speedl(self.robot, self.speeds)
-                    if self.button_pressed(0) and self.auto.value == 0 and self.is_master:
-                        self.ensure_slave()
-                        self.slave_speeds = self.get_slave_speeds()
-                        self.send_speedl(self.slave, self.slave_speeds)
-                else:
-                    time.sleep(0.02)
-
-            except Exception as e:
-                error_msg = f"{type(e).__name__}:{str(e)[:100]}"
-                self.logger.exception(f"Ошибка при работе с роботом IP: {self.IP}, скорости: {self.speeds}")
-                self.heartbeat.put((mp.current_process().name, "ERROR", error_msg, time.time()))
-                break
-
-            if self.button_pressed(6) and (not self.button_pressed(
-                    7)) and self.auto.value == 1 and self.is_master:  # включение синхронного режима
+            if self.button_pressed(6) and not self.button_pressed(7) and self.auto.value == 1 and self.is_master:
                 self.auto.value = 0
-                self.logger.info(f"Система переведена в синхронный режим")
-            if self.button_pressed(7) and (not self.button_pressed(
-                    6)) and self.auto.value == 0 and self.is_master:  # включение асинхронного режима
+                self.logger.info("Система переведена в синхронный режим")
+                time.sleep(0.3)
+            elif self.button_pressed(7) and not self.button_pressed(6) and self.auto.value == 0 and self.is_master:
                 self.auto.value = 1
-                self.logger.info(f"Система переведена в асинхронный режим")
-            if self.button_pressed(8):
-                if self.auto.value == 0:
-                    if self.is_master:
-                        self.ensure_slave()
-                        self.slave_pos = self.pose_to_list(self.slave.getl())
-                        self.slave.movel((self.slave_pos[0], self.slave_pos[1], self.slave_pos[2], 0, 3.14, 0), 0.2,
-                                         0.2)  # выравнивание хирурга
-
-            if self.button_pressed(10):
-                self.path.append(self.pose_to_list(self.robot.getl()))
-                self.logger.debug(f"Записана точка {self.path[-1]}")
-            if self.button_pressed(11):
-                following_path = True
-                for pose in self.path:
-                    self.logger.debug(f"Перемещение в точку с координатами {pose}")
-                    self.robot.movel(pose, acc=0.2, vel=0.2)
-                    while self.robot.is_program_running():
-                        pygame.event.pump()
-                        if self.button_pressed(11):
-                            following_path = False
-                            self.robot.stop()
-
-            if self.button_pressed(9):
-                self.shared_path[0] = deepcopy(self.path)
-                self.logger.debug(f"Записана траектория {self.shared_path[0]}")
-                self.path = []
-                time.sleep(2)
+                self.logger.info("Система переведена в асинхронный режим")
+                time.sleep(0.3)
 
     def close(self):
+        if self.was_moving:
+            self.robot.stop()
+            if self.slave:
+                self.slave.stop()
         if self.joystick:
             self.joystick.quit()
-        if self.robot:
-            self.robot.close()
-        if self.is_master and self.slave:
+        self.robot.close()
+        if self.slave:
             self.slave.close()
+        pygame.quit()
+
+
+def setup_process_logger():
+    logger = logging.getLogger(f"RobotControl.{mp.current_process().name}")
+    logger.setLevel(logging.DEBUG)
+    if logger.handlers:
+        return logger
+
+    os.makedirs("logs", exist_ok=True)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s.%(msecs)03d | %(levelname)-8s | %(processName)-15s | %(threadName)-15s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler = RotatingFileHandler(
+        filename=f'logs/processes_status_log_{datetime.now().strftime("%Y-%m-%d")}.log',
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    return logger
 
 
 def main(IP, is_master, auto, lock, shared_path, heartbeat, slave_IP=None):
-    proc_logger = logging.getLogger(f"RobotControl.{mp.current_process().name}")
-    proc_logger.setLevel(logging.DEBUG)
-    if not proc_logger.handlers:
-        formatter = logging.Formatter(
-            fmt='%(asctime)s.%(msecs)03d | %(levelname)-8s | %(processName)-15s | %(threadName)-15s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-
-        file_handler = RotatingFileHandler(
-            filename=f'logs/processes_status_log_{datetime.now().strftime("%Y-%m-%d")}.log',
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5,
-            encoding='utf-8'
-        )
-
-        file_handler.setFormatter(formatter)
-        proc_logger.addHandler(file_handler)
-
-    proc_logger.info(f"Запуск рабочего процесса | PID: {os.getpid()}")
-
-    robot = Robot(IP, is_master, proc_logger, auto, lock, shared_path, heartbeat, slave_IP)
+    logger = setup_process_logger()
+    logger.info(f"Запуск прямого управления | PID: {os.getpid()}")
+    controller = JoystickRobotController(IP, is_master, logger, auto, lock, shared_path, heartbeat, slave_IP)
     try:
-        robot.start_robot()
+        controller.start()
     except Exception as exc:
-        error_msg = f"{type(exc).__name__}: {str(exc)[:200]}"
-        proc_logger.exception(f"Процесс управления остановлен: {error_msg}")
-        heartbeat.put((mp.current_process().name, "ERROR", error_msg, time.time()))
+        message = f"{type(exc).__name__}: {str(exc)[:200]}"
+        logger.exception(f"Процесс управления остановлен: {message}")
+        heartbeat.put((mp.current_process().name, "ERROR", message, time.time()))
     finally:
-        robot.close()
+        controller.close()

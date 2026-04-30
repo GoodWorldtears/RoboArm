@@ -712,6 +712,7 @@ class RobotControlUI(ctk.CTk):
             ("IP хирурга", "surgeon_ip_entry", self.config.surgeon_ip),
             ("Камера диагноста", "diagnost_camera_entry", self.config.diagnost_camera_url),
             ("Камера хирурга", "surgeon_camera_entry", self.config.surgeon_camera_url),
+            ("Порт управления", "control_port_entry", str(self.config.control_port)),
             ("Джойстик хирурга", "joystick_master_entry", str(self.config.joystick_master_id)),
             ("Джойстик диагноста", "joystick_slave_entry", str(self.config.joystick_slave_id)),
         ]
@@ -737,6 +738,7 @@ class RobotControlUI(ctk.CTk):
                 diagnost_camera_url=self.diagnost_camera_entry.get().strip(),
                 surgeon_camera_url=self.surgeon_camera_entry.get().strip(),
                 dashboard_port=self.config.dashboard_port,
+                control_port=int(self.control_port_entry.get()),
                 joystick_master_id=int(self.joystick_master_entry.get()),
                 joystick_slave_id=int(self.joystick_slave_entry.get()),
                 deadzone=self.config.deadzone,

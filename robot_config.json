@@ -6,6 +6,7 @@
   "laser_host": "192.168.8.149",
   "laser_port": 9093,
   "dashboard_port": 29999,
+  "control_port": 30002,
   "joystick_master_id": 0,
   "joystick_slave_id": 1,
   "deadzone": 0.2,
