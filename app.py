@@ -859,7 +859,7 @@ class RobotControlUI(ctk.CTk):
             'state': 'AWAITING',
             'pid': None,
             'target': robot_control.main,
-            'restartable': True
+            'restartable': False
         }
         self.heartbeat.put(("surgeon_control", "AWAITING"))
         self.processes['diagnost_control'] = {
@@ -871,7 +871,7 @@ class RobotControlUI(ctk.CTk):
             'state': 'AWAITING',
             'pid': None,
             'target': robot_control.main,
-            'restartable': True
+            'restartable': False
         }
         self.heartbeat.put(("diagnost_control", "AWAITING"))
 

@@ -13,6 +13,13 @@ import os
 from config import load_config
 
 
+def as_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class Robot:
 
     def __init__(self, IP, is_master, logger, auto, lock, shared_path, heartbeat, slave_IP=None):
@@ -80,19 +87,19 @@ class Robot:
 
     def set_robot_settings(self, linear_velocity=0.3, rotational_velocity=0.1, acceleration=0.1):
         if self.is_master:
-            self.linear_velocity = self.config.linear_velocity
+            self.linear_velocity = as_float(self.config.linear_velocity, 0.015)
         else:
-            self.linear_velocity = self.config.diagnost_linear_velocity
-        self.rotational_velocity = self.config.rotational_velocity
-        self.acceleration = self.config.acceleration
+            self.linear_velocity = as_float(self.config.diagnost_linear_velocity, 0.01)
+        self.rotational_velocity = as_float(self.config.rotational_velocity, 0.19)
+        self.acceleration = as_float(self.config.acceleration, 0.1)
 
     def get_speeds(self):
         pygame.event.pump()
         speeds = [0, 0, 0, 0, 0, 0]  # массив скоростей
 
         hat = self.joystick.get_hat(0) if self.joystick.get_numhats() > 0 else (0, 0)
-        speeds[1] = 1 * hat[1] * self.linear_velocity  # скорость по оси у
-        speeds[0] = 1 * hat[0] * self.linear_velocity  # скорость по оси х
+        speeds[1] = as_float(hat[1]) * self.linear_velocity  # скорость по оси у
+        speeds[0] = as_float(hat[0]) * self.linear_velocity  # скорость по оси х
         if self.button_pressed(2) and not self.button_pressed(3):  # движение по оси z
             speeds[2] = 1 * -self.linear_velocity  # скорость по оси z
         if self.button_pressed(3) and not self.button_pressed(2):  # движение против оси z
@@ -103,17 +110,18 @@ class Robot:
         axis1 = self.joystick.get_axis(1) if axes_count > 1 else 0
         axis3 = self.joystick.get_axis(3) if axes_count > 3 else 0
 
-        speeds[3] = (axis1 if abs(
-            axis1) > self.deadzone else 0) * self.rotational_velocity  # круговая скорость в плоскости xy
-        speeds[4] = (axis0 if abs(
-            axis0) > self.deadzone else 0) * self.rotational_velocity  # круговая скорость в плоскости xz
-        speeds[5] = (axis3 if abs(
-            axis3) > self.deadzone else 0) * self.rotational_velocity  # круговая скорость в плоскости yz
+        speeds[3] = (axis1 if abs(axis1) > self.deadzone else 0.0) * self.rotational_velocity
+        speeds[4] = (axis0 if abs(axis0) > self.deadzone else 0.0) * self.rotational_velocity
+        speeds[5] = (axis3 if abs(axis3) > self.deadzone else 0.0) * self.rotational_velocity
 
-        return speeds
+        return [float(speed) for speed in speeds]
 
     def button_pressed(self, button_id):
         return self.joystick.get_numbuttons() > button_id and self.joystick.get_button(button_id)
+
+    @staticmethod
+    def has_motion(speeds):
+        return any(abs(speed) > 1e-6 for speed in speeds)
 
     def update_heartbeat(self):
         current_time = time.time()
@@ -155,20 +163,20 @@ class Robot:
             self.speeds = self.get_speeds()
 
             try:
-                if self.button_pressed(0):  # если зажат курок
-                    self.robot.speedl_tool(self.speeds, 0.1,
-                                           2)  # перемещение робота в системе координат конечного звена
-                    if self.auto.value == 0:  # если включён режим синхронного перемещения
-                        if self.is_master:
+                if self.has_motion(self.speeds):
+                    if self.button_pressed(0):  # если зажат курок
+                        self.robot.speedl_tool(self.speeds, self.acceleration, 0.2)
+                        if self.auto.value == 0 and self.is_master:
                             self.slave_speeds = self.get_slave_speeds()
-                            self.slave.speedl(self.slave_speeds, 0.1, 2)
+                            self.slave.speedl(self.slave_speeds, self.acceleration, 0.2)
+                    else:
+                        self.robot.speedl(self.speeds, self.acceleration, 0.2)
                 else:
-                    self.robot.speedl(self.speeds, 0.1,
-                                      2)  # если курок не зажат, то робот перемещается в системе координат основания
+                    time.sleep(0.02)
 
-            except(urx.RobotException, TimeoutError, ConnectionError) as e:
+            except Exception as e:
                 error_msg = f"{type(e).__name__}:{str(e)[:100]}"
-                self.logger.error(f"Ошибка приработе с роботом IP: {self.IP}, сообщение: {error_msg}")
+                self.logger.exception(f"Ошибка при работе с роботом IP: {self.IP}, скорости: {self.speeds}")
                 self.heartbeat.put((mp.current_process().name, "ERROR", error_msg, time.time()))
                 break
 
