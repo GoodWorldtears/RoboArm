@@ -83,13 +83,29 @@ def main():
     parser = argparse.ArgumentParser(description="Tiny direct URScript movement test without urx or joystick.")
     parser.add_argument("robot", choices=["diagnost", "surgeon"], help="Robot from robot_config.json")
     parser.add_argument("--axis", choices=sorted(AXES), default="z+", help="Base-coordinate movement axis")
-    parser.add_argument("--speed", type=float, default=0.005, help="Linear speed in m/s")
-    parser.add_argument("--duration", type=float, default=0.5, help="Move duration in seconds")
-    parser.add_argument("--acceleration", type=float, default=0.05, help="Acceleration in m/s^2")
+    parser.add_argument("--speed", type=float, default=0.02, help="Linear speed in m/s")
+    parser.add_argument("--duration", type=float, default=1.0, help="Move duration in seconds")
+    parser.add_argument("--acceleration", type=float, default=0.1, help="Acceleration in m/s^2")
+    parser.add_argument("--small", action="store_true", help="Preset: about 5 mm")
+    parser.add_argument("--medium", action="store_true", help="Preset: about 20 mm")
+    parser.add_argument("--large", action="store_true", help="Preset: about 50 mm")
     parser.add_argument("--no-return", action="store_true", help="Do not move back after the test move")
     parser.add_argument("--port", type=int, default=30002, help="URScript port: try 30002, then 30001")
     parser.add_argument("--execute", action="store_true", help="Actually send the movement program")
     args = parser.parse_args()
+
+    if args.small:
+        args.speed = 0.01
+        args.duration = 0.5
+        args.acceleration = 0.05
+    elif args.medium:
+        args.speed = 0.02
+        args.duration = 1.0
+        args.acceleration = 0.1
+    elif args.large:
+        args.speed = 0.05
+        args.duration = 1.0
+        args.acceleration = 0.15
 
     host = robot_ip(args.robot)
     program = urscript(args.axis, args.speed, args.duration, args.acceleration, not args.no_return)
